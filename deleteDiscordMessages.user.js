@@ -11,11 +11,10 @@
 // @license         MIT
 // @namespace       https://github.com/victornpb/deleteDiscordMessages
 // @icon            https://victornpb.github.io/undiscord/images/icon128.png
+// @downloadURL     https://raw.githubusercontent.com/victornpb/undiscord/master/deleteDiscordMessages.user.js
 // @contributionURL https://www.buymeacoffee.com/vitim
 // @grant           none
 // @attribution     Original project (https://github.com/victornpb/undiscord)
-// @downloadURL https://update.greasyfork.org/scripts/406540/Undiscord.user.js
-// @updateURL https://update.greasyfork.org/scripts/406540/Undiscord.meta.js
 // ==/UserScript==
 (function () {
 	'use strict';
@@ -294,6 +293,18 @@
                     <div class="sectionDescription">
                         Specify an interval to delete messages.
                     </div>
+					<fieldset>
+						<legend>
+							Message IDs
+							<a href="{{WIKI}}/messageId" title="Help" target="_blank" rel="noopener noreferrer">help</a>
+						</legend>
+						<div class="input-wrapper mb1">
+							<textarea id="messageIds" placeholder="Comma or newline separated message IDs" style="width:100%;height:80px"></textarea>
+						</div>
+						<div class="sectionDescription">
+							Provide specific message IDs to delete directly. This bypasses the search API.
+						</div>
+					</fieldset>
                 </fieldset>
             </details>
             <details>
@@ -552,11 +563,16 @@
 	      this.state.iterations++;
 
 	      log.verb('Fetching messages...');
-	      // Search messages
-	      await this.search();
+			  // If the user provided explicit message IDs, load those instead of using the search endpoint
+			  if (this.options.messageIds && this.options.messageIds.length) {
+			    await this.loadMessagesFromIds();
+			  } else {
+			    // Search messages
+			    await this.search();
 
-	      // Process results and find which messages should be deleted
-	      await this.filterResponse();
+			    // Process results and find which messages should be deleted
+			    await this.filterResponse();
+			  }
 
 	      log.verb(
 	        `Grand total: ${this.state.grandTotal}`,
@@ -715,6 +731,105 @@
 	    this.state._seachResponse = data;
 	    console.log(PREFIX$1, 'search', data);
 	    return data;
+	  }
+
+	  /**
+	   * Load messages by explicit IDs (bypass search endpoint)
+	   */
+	  async loadMessagesFromIds() {
+	    const ids = this.options.messageIds || [];
+	    const fetched = [];
+	
+	    for (let i = 0; i < ids.length; i++) {
+	      const id = ids[i];
+	      const API_MSG_URL = `https://discord.com/api/v9/channels/${this.options.channelId}/messages/${id}`;
+	      let resp;
+	      try {
+	        this.beforeRequest();
+	        resp = await fetch(API_MSG_URL, {
+	          headers: { 'Authorization': this.options.authToken }
+	        });
+	        this.afterRequest();
+	      } catch (err) {
+	        log.error('Fetch message threw an error:', err);
+	        this.state.failCount++;
+	        continue;
+	      }
+
+	      if (resp.status === 429) {
+	        // rate limited, wait then retry this id
+	        const body = await resp.json().catch(() => ({}));
+	        const w = (body.retry_after || 1) * 1000;
+	        this.stats.throttledCount++;
+	        this.stats.throttledTotalTime += w;
+	        log.warn(`Being rate limited while fetching messages for ${id}. Waiting ${w}ms...`);
+	        await wait(w);
+	        i--;
+	        continue;
+	      }
+
+	      if (!resp.ok) {
+	        log.warn(`Could not fetch message ${id}, status ${resp.status}`);
+	        this.state.failCount++;
+	        continue;
+	      }
+
+	      try {
+	        const msg = await resp.json();
+	        fetched.push(msg);
+	      } catch (e) {
+	        log.error('Fail to parse message JSON for', id, e);
+	        this.state.failCount++;
+	      }
+	    }
+
+	    // Apply filters similar to filterResponse
+	    let messagesToDelete = fetched.slice();
+
+	    // only deletable types
+	    messagesToDelete = messagesToDelete.filter(msg => msg.type === 0 || (msg.type >= 6 && msg.type <= 21));
+	    // pinned
+	    messagesToDelete = messagesToDelete.filter(msg => msg.pinned ? this.options.includePinned : true);
+	    // author filter
+	    if (this.options.authorId) messagesToDelete = messagesToDelete.filter(msg => msg.author && msg.author.id === this.options.authorId);
+	    // content filter
+	    if (this.options.content) messagesToDelete = messagesToDelete.filter(msg => (msg.content || '').includes(this.options.content));
+	    // hasLink
+	    if (this.options.hasLink) messagesToDelete = messagesToDelete.filter(msg => /https?:\/\//i.test(msg.content || '') || /www\./i.test(msg.content || ''));
+	    // hasFile
+	    if (this.options.hasFile) messagesToDelete = messagesToDelete.filter(msg => msg.attachments && msg.attachments.length);
+	    // min/max id filter (interpret min/max using toSnowflake when needed)
+	    try {
+	      if (this.options.minId) {
+	        const minSf = BigInt(toSnowflake(this.options.minId));
+	        messagesToDelete = messagesToDelete.filter(msg => BigInt(msg.id) >= minSf);
+	      }
+	      if (this.options.maxId) {
+	        const maxSf = BigInt(toSnowflake(this.options.maxId));
+	        messagesToDelete = messagesToDelete.filter(msg => BigInt(msg.id) <= maxSf);
+	      }
+	    } catch (e) {
+	      // ignore if BigInt not available or malformed id
+	      log.warn('Skipping min/max id filtering due to parse error', e);
+	    }
+
+	    // pattern
+	    try {
+	      const regex = new RegExp(this.options.pattern, 'i');
+	      messagesToDelete = messagesToDelete.filter(msg => regex.test(msg.content || ''));
+	    } catch (e) {
+	      log.warn('Ignoring RegExp because pattern is malformed!', e);
+	    }
+
+	    const skipped = fetched.filter(msg => !messagesToDelete.find(m => m.id === msg.id));
+
+	    this.state._messagesToDelete = messagesToDelete;
+	    this.state._skippedMessages = skipped;
+	    this.state._seachResponse = { messages: fetched.map(m => [m]), total_results: fetched.length };
+	    // Adjust grandTotal to reflect items we will attempt to delete
+	    if (messagesToDelete.length > this.state.grandTotal) this.state.grandTotal = messagesToDelete.length;
+
+	    console.log(PREFIX$1, 'loadMessagesFromIds', this.state);
 	  }
 
 	  async filterResponse() {
@@ -1275,7 +1390,7 @@ body.undiscord-pick-message.after [id^="message-content-"]:hover::after {
 	    }, 3000);
 	  });
 	  observer.observe(discordElm, { attributes: false, childList: true, subtree: true });
-      toggleWindow();
+	  toggleWindow();
 
 	  function toggleWindow() {
 	    if (ui.undiscordWindow.style.display !== 'none') {
@@ -1461,12 +1576,23 @@ body.undiscord-pick-message.after [id^="message-content-"]:hover::after {
 	  // message interval
 	  const minId = $('input#minId').value.trim();
 	  const maxId = $('input#maxId').value.trim();
+	// explicit message ids (comma or newline separated)
+	const messageIdsRaw = ($('textarea#messageIds') ? $('textarea#messageIds').value.trim() : '');
+	let messageIds = messageIdsRaw ? messageIdsRaw.split(/[^0-9]+/).filter(Boolean) : [];
 	  // date range
 	  const minDate = $('input#minDate').value.trim();
 	  const maxDate = $('input#maxDate').value.trim();
-	  //advanced
-	  const searchDelay = parseInt($('input#searchDelay').value.trim());
-	  const deleteDelay = parseInt($('input#deleteDelay').value.trim());
+	//advanced
+	const searchDelay = parseInt($('input#searchDelay').value.trim());
+	let deleteDelay = parseInt($('input#deleteDelay').value.trim());
+	// If using explicit message IDs, enforce max 25 deletes per minute (>= 2400ms per delete)
+	if (messageIds.length) {
+		const minDelay = Math.ceil(60000 / 25); // 2400ms
+		if (!deleteDelay || deleteDelay < minDelay) {
+			log.info(`Using explicit message IDs: enforcing delete delay of ${minDelay}ms (25 deletes/min).`);
+			deleteDelay = minDelay;
+		}
+	}
 	 
 	  // token
 	  const authToken = $('input#token').value.trim() || fillToken();
@@ -1474,6 +1600,7 @@ body.undiscord-pick-message.after [id^="message-content-"]:hover::after {
 	  
 	  // validate input
 	  if (!guildId) return log.error('You must fill the "Server ID" field!');
+	if (messageIds.length && channelIds.length > 1) return log.error('When using message IDs you must specify a single channel.');
 	 
 	  // clear logArea
 	  ui.logArea.innerHTML = '';
@@ -1485,6 +1612,7 @@ body.undiscord-pick-message.after [id^="message-content-"]:hover::after {
 	    authorId,
 	    guildId,
 	    channelId: channelIds.length === 1 ? channelIds[0] : undefined, // single or multiple channel
+				messageIds: messageIds.length ? messageIds : undefined,
 	    minId: minId || minDate,
 	    maxId: maxId || maxDate,
 	    content,
@@ -1494,7 +1622,7 @@ body.undiscord-pick-message.after [id^="message-content-"]:hover::after {
 	    includePinned,
 	    pattern,
 	    searchDelay,
-	    deleteDelay,
+		deleteDelay,
 	    // maxAttempt: 2,
 	  };
 	  if (channelIds.length > 1) {
