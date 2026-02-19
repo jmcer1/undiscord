@@ -213,6 +213,18 @@
                         <label class="row"><input id="includeNsfw" type="checkbox">This is a NSFW channel</label>
                     </div>
                 </fieldset>
+				<fieldset>
+					<legend>
+						Message IDs
+						<a href="{{WIKI}}/messageId" title="Help" target="_blank" rel="noopener noreferrer">help</a>
+					</legend>
+					<div class="input-wrapper mb1">
+						<textarea id="messageIds" placeholder="Comma or newline separated message IDs" style="width:100%;height:80px"></textarea>
+					</div>
+					<div class="sectionDescription">
+						Provide specific message IDs to delete directly. This bypasses the search API.
+					</div>
+				</fieldset>
             </details>
             <details>
                 <summary>Wipe Archive</summary>
@@ -293,18 +305,6 @@
                     <div class="sectionDescription">
                         Specify an interval to delete messages.
                     </div>
-					<fieldset>
-						<legend>
-							Message IDs
-							<a href="{{WIKI}}/messageId" title="Help" target="_blank" rel="noopener noreferrer">help</a>
-						</legend>
-						<div class="input-wrapper mb1">
-							<textarea id="messageIds" placeholder="Comma or newline separated message IDs" style="width:100%;height:80px"></textarea>
-						</div>
-						<div class="sectionDescription">
-							Provide specific message IDs to delete directly. This bypasses the search API.
-						</div>
-					</fieldset>
                 </fieldset>
             </details>
             <details>
@@ -738,98 +738,37 @@
 	   */
 	  async loadMessagesFromIds() {
 	    const ids = this.options.messageIds || [];
-	    const fetched = [];
-	
-	    for (let i = 0; i < ids.length; i++) {
-	      const id = ids[i];
-	      const API_MSG_URL = `https://discord.com/api/v9/channels/${this.options.channelId}/messages/${id}`;
-	      let resp;
-	      try {
-	        this.beforeRequest();
-	        resp = await fetch(API_MSG_URL, {
-	          headers: { 'Authorization': this.options.authToken }
-	        });
-	        this.afterRequest();
-	      } catch (err) {
-	        log.error('Fetch message threw an error:', err);
-	        this.state.failCount++;
-	        continue;
-	      }
-
-	      if (resp.status === 429) {
-	        // rate limited, wait then retry this id
-	        const body = await resp.json().catch(() => ({}));
-	        const w = (body.retry_after || 1) * 1000;
-	        this.stats.throttledCount++;
-	        this.stats.throttledTotalTime += w;
-	        log.warn(`Being rate limited while fetching messages for ${id}. Waiting ${w}ms...`);
-	        await wait(w);
-	        i--;
-	        continue;
-	      }
-
-	      if (!resp.ok) {
-	        log.warn(`Could not fetch message ${id}, status ${resp.status}`);
-	        this.state.failCount++;
-	        continue;
-	      }
-
-	      try {
-	        const msg = await resp.json();
-	        fetched.push(msg);
-	      } catch (e) {
-	        log.error('Fail to parse message JSON for', id, e);
-	        this.state.failCount++;
-	      }
+	    if (!ids.length) {
+	      this.state._messagesToDelete = [];
+	      this.state._skippedMessages = [];
+	      this.state._seachResponse = { messages: [], total_results: 0 };
+	      return;
 	    }
 
-	    // Apply filters similar to filterResponse
-	    let messagesToDelete = fetched.slice();
-
-	    // only deletable types
-	    messagesToDelete = messagesToDelete.filter(msg => msg.type === 0 || (msg.type >= 6 && msg.type <= 21));
-	    // pinned
-	    messagesToDelete = messagesToDelete.filter(msg => msg.pinned ? this.options.includePinned : true);
-	    // author filter
-	    if (this.options.authorId) messagesToDelete = messagesToDelete.filter(msg => msg.author && msg.author.id === this.options.authorId);
-	    // content filter
-	    if (this.options.content) messagesToDelete = messagesToDelete.filter(msg => (msg.content || '').includes(this.options.content));
-	    // hasLink
-	    if (this.options.hasLink) messagesToDelete = messagesToDelete.filter(msg => /https?:\/\//i.test(msg.content || '') || /www\./i.test(msg.content || ''));
-	    // hasFile
-	    if (this.options.hasFile) messagesToDelete = messagesToDelete.filter(msg => msg.attachments && msg.attachments.length);
-	    // min/max id filter (interpret min/max using toSnowflake when needed)
-	    try {
-	      if (this.options.minId) {
-	        const minSf = BigInt(toSnowflake(this.options.minId));
-	        messagesToDelete = messagesToDelete.filter(msg => BigInt(msg.id) >= minSf);
-	      }
-	      if (this.options.maxId) {
-	        const maxSf = BigInt(toSnowflake(this.options.maxId));
-	        messagesToDelete = messagesToDelete.filter(msg => BigInt(msg.id) <= maxSf);
-	      }
-	    } catch (e) {
-	      // ignore if BigInt not available or malformed id
-	      log.warn('Skipping min/max id filtering due to parse error', e);
+	    if (!this.options.channelId) {
+	      log.error('No channelId provided for message IDs.');
+	      this.state.running = false;
+	      return;
 	    }
 
-	    // pattern
-	    try {
-	      const regex = new RegExp(this.options.pattern, 'i');
-	      messagesToDelete = messagesToDelete.filter(msg => regex.test(msg.content || ''));
-	    } catch (e) {
-	      log.warn('Ignoring RegExp because pattern is malformed!', e);
-	    }
-
-	    const skipped = fetched.filter(msg => !messagesToDelete.find(m => m.id === msg.id));
+	    // Create minimal message objects to avoid extra GET requests.
+	    const messagesToDelete = ids.map(id => ({
+	      id: id,
+	      channel_id: this.options.channelId,
+	      timestamp: new Date().toISOString(),
+	      author: { username: 'unknown', discriminator: '0000', id: this.options.authorId || '0' },
+	      content: '',
+	      attachments: [],
+	      pinned: false,
+	      type: 0,
+	    }));
 
 	    this.state._messagesToDelete = messagesToDelete;
-	    this.state._skippedMessages = skipped;
-	    this.state._seachResponse = { messages: fetched.map(m => [m]), total_results: fetched.length };
-	    // Adjust grandTotal to reflect items we will attempt to delete
+	    this.state._skippedMessages = [];
+	    this.state._seachResponse = { messages: messagesToDelete.map(m => [m]), total_results: messagesToDelete.length };
 	    if (messagesToDelete.length > this.state.grandTotal) this.state.grandTotal = messagesToDelete.length;
 
-	    console.log(PREFIX$1, 'loadMessagesFromIds', this.state);
+	    console.log(PREFIX$1, 'loadMessagesFromIds (queued)', this.state);
 	  }
 
 	  async filterResponse() {
