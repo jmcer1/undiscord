@@ -494,6 +494,9 @@
 	  onProgress = undefined;
 	  onStop = undefined;
 
+	// internal flag: true while processing explicit message IDs
+	_usingMessageIds = false;
+
 	  resetState() {
 	    this.state = {
 	      running: false,
@@ -563,10 +566,11 @@
 	      this.state.iterations++;
 
 	      log.verb('Fetching messages...');
-			  // If the user provided explicit message IDs, load those instead of using the search endpoint
-			  if (this.options.messageIds && this.options.messageIds.length) {
-			    await this.loadMessagesFromIds();
-			  } else {
+			// If the user provided explicit message IDs, load those instead of using the search endpoint
+			if (this.options.messageIds && this.options.messageIds.length) {
+				this._usingMessageIds = true;
+				await this.loadMessagesFromIds();
+			} else {
 			    // Search messages
 			    await this.search();
 
@@ -595,7 +599,15 @@
 	          break; // immmediately stop this iteration
 	        }
 
-	        await this.deleteMessagesFromList();
+				await this.deleteMessagesFromList();
+
+				// If we were processing an explicit list of IDs, stop after this batch to avoid re-queuing.
+				if (this._usingMessageIds) {
+					log.info('Completed explicit message ID batch. Stopping.');
+					this._usingMessageIds = false;
+					this.state.running = false;
+					break;
+				}
 	      }
 	      else if (this.state._skippedMessages.length > 0) {
 	        // There are stuff, but nothing to delete (example a page full of system messages)
