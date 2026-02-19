@@ -11,10 +11,11 @@
 // @license         MIT
 // @namespace       https://github.com/victornpb/deleteDiscordMessages
 // @icon            https://victornpb.github.io/undiscord/images/icon128.png
-// @downloadURL     https://raw.githubusercontent.com/victornpb/undiscord/master/deleteDiscordMessages.user.js
 // @contributionURL https://www.buymeacoffee.com/vitim
 // @grant           none
 // @attribution     Original project (https://github.com/victornpb/undiscord)
+// @downloadURL https://update.greasyfork.org/scripts/406540/Undiscord.user.js
+// @updateURL https://update.greasyfork.org/scripts/406540/Undiscord.meta.js
 // ==/UserScript==
 (function () {
 	'use strict';
@@ -1259,7 +1260,7 @@ body.undiscord-pick-message.after [id^="message-content-"]:hover::after {
 	  ui.undiscordBtn = createElm(buttonHtml);
 	  ui.undiscordBtn.onclick = toggleWindow;
 	  function mountBtn() {
-	    const toolbar = document.querySelector('#app-mount [class*="-toolbar"]');
+	    const toolbar = document.querySelector('#app-mount [class*="toolbar"]');
 	    if (toolbar) toolbar.appendChild(ui.undiscordBtn);
 	  }
 	  mountBtn();
@@ -1274,6 +1275,7 @@ body.undiscord-pick-message.after [id^="message-content-"]:hover::after {
 	    }, 3000);
 	  });
 	  observer.observe(discordElm, { attributes: false, childList: true, subtree: true });
+      toggleWindow();
 
 	  function toggleWindow() {
 	    if (ui.undiscordWindow.style.display !== 'none') {
